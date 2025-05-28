@@ -62,7 +62,7 @@ class PPOTrainer(ABC):
             self.n_gpus = self.args.ref_num_nodes * self.args.ref_num_gpus_per_node
             self.n_gpus += self.args.reward_num_nodes * self.args.reward_num_gpus_per_node
             self.n_gpus += self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
-            self.n_gpus += self.vllm_num_engines * self.args.vllm_tensor_parallel_size
+            self.n_gpus += self.args.vllm_num_engines * self.args.vllm_tensor_parallel_size
 
         self.tokenizer = get_tokenizer(pretrain, None, "left", strategy, use_fast=not self.args.disable_fast_tokenizer)
         self.actor_model_group = actor_model_group
