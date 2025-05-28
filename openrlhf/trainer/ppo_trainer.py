@@ -203,11 +203,14 @@ class PPOTrainer(ABC):
 
                     status = self.ppo_train(steps)
                 
-                total_num_tokens = sum(torch.sum(e.info["total_length"]) for e in experiences)
+                total_num_tokens = sum(torch.sum(e.info["total_length"]).item() for e in experiences)
                 time = timing_raw["step"]
-                status["perf/total_num_tokens"] = total_num_tokens
-                status["perf/time_per_step"] = time
-                status["perf/throughput"] = total_num_tokens / (time * self.n_gpus)
+                throughput = total_num_tokens / (time * self.n_gpus)
+                if steps % args.logging_steps == 0:
+                    logger.info(
+                        f"step: {steps} - perf/total_num_tokens: {total_num_tokens}"
+                        f" - perf/time: {time} - perf/throughput: {throughput}"
+                    )
 
                 if "kl" in status:
                     self.kl_ctl.update(status["kl"], args.rollout_batch_size * args.n_samples_per_prompt)
