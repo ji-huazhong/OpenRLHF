@@ -21,9 +21,10 @@ from openrlhf.utils.remote_rm_utils import remote_rm_fn_ray
 logger = init_logger(__name__)
 
 
+@contextmanager
 def _timer(name: str, timing_raw: dict[str, float]):
     with Timer(name=name, logger=None) as timer:
-        yield timer
+        yield
     if name not in timing_raw:
         timing_raw[name] = 0
     timing_raw[name] += timer.last
