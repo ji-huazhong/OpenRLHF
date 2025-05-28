@@ -2,10 +2,12 @@ import os
 import time
 from abc import ABC
 from datetime import timedelta
+from contextlib import contextmanager
 
 import ray
 import torch
 from tqdm import tqdm
+from codetiming import Timer
 
 from openrlhf.datasets import PromptDataset
 from openrlhf.trainer.ppo_utils import AdaptiveKLController, FixedKLController
@@ -17,6 +19,14 @@ from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.remote_rm_utils import remote_rm_fn_ray
 
 logger = init_logger(__name__)
+
+
+def _timer(name: str, timing_raw: dict[str, float]):
+    with Timer(name=name, logger=None) as timer:
+        yield timer
+    if name not in timing_raw:
+        timing_raw[name] = 0
+    timing_raw[name] += timer.last
 
 
 @ray.remote
@@ -45,6 +55,14 @@ class PPOTrainer(ABC):
 
         self.strategy = strategy
         self.args = strategy.args
+
+        # NB: Currently n_gpus is only meaningful in a standalone placement scenario
+        self.n_gpus = 1
+        if self.args.advantage_estimator not in ["gae"]:
+            self.n_gpus = self.args.ref_num_nodes * self.args.ref_num_gpus_per_node
+            self.n_gpus += self.args.reward_num_nodes * self.args.reward_num_gpus_per_node
+            self.n_gpus += self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
+            self.n_gpus += self.vllm_num_engines * self.args.vllm_tensor_parallel_size
 
         self.tokenizer = get_tokenizer(pretrain, None, "left", strategy, use_fast=not self.args.disable_fast_tokenizer)
         self.actor_model_group = actor_model_group
@@ -169,19 +187,27 @@ class PPOTrainer(ABC):
             )
 
             for _, rand_prompts, labels in self.prompts_dataloader:
-                experiences = self.experience_maker.make_experience_list(rand_prompts, labels, **self.generate_kwargs)
-                sample0 = self.tokenizer.batch_decode(
-                    experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
-                )
-                print(sample0)
-                refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
-                if self.critic_model_group is not None:
-                    refs.extend(
-                        self.critic_model_group.async_run_method_batch(method_name="append", experience=experiences)
+                timing_raw = {}
+                with _timer("step", timing_raw):
+                    experiences = self.experience_maker.make_experience_list(rand_prompts, labels, **self.generate_kwargs)
+                    sample0 = self.tokenizer.batch_decode(
+                        experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
                     )
-                ray.get(refs)
+                    print(sample0)
+                    refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
+                    if self.critic_model_group is not None:
+                        refs.extend(
+                            self.critic_model_group.async_run_method_batch(method_name="append", experience=experiences)
+                        )
+                    ray.get(refs)
 
-                status = self.ppo_train(steps)
+                    status = self.ppo_train(steps)
+                
+                total_num_tokens = sum(torch.sum(e.info["total_length"]) for e in experiences)
+                time = timing_raw["step"]
+                status["perf/total_num_tokens"] = total_num_tokens
+                status["perf/time_per_step"] = time
+                status["perf/throughput"] = total_num_tokens / (time * self.n_gpus)
 
                 if "kl" in status:
                     self.kl_ctl.update(status["kl"], args.rollout_batch_size * args.n_samples_per_prompt)
